@@ -4,13 +4,14 @@ import datetime
 import pathlib
 import numpy
 import json
+import scipy.optimize
 import matplotlib.pyplot as plt
 
 
 class CovidStats:
     URL = 'https://coronavirus-tracker-api.herokuapp.com'
     STATUS = ['confirmed', 'deaths', 'recovered']
-    MIN_FOR_CUMUL_CHART = 1000
+    MIN_FOR_CHARTS = 1000
 
     def __init__(self):
         cwd = pathlib.Path.cwd()
@@ -19,6 +20,9 @@ class CovidStats:
         self.cumul_dir = cwd / "cumul_charts"
         if not self.cumul_dir.exists():
             self.cumul_dir.mkdir()
+        self.log_dir = cwd / "log_charts"
+        if not self.log_dir.exists():
+            self.log_dir.mkdir()
         self.last_day_file = cwd / "last_day.json"
         self.last_day = self.get_last_day()
         self.today = datetime.date.today()
@@ -58,48 +62,105 @@ class CovidStats:
             print(f'{status} df made')
         return df_by_status
 
-    def make_chart(self, df, country):
-        df = df.drop('confirmed', axis=1)
-        df = df[['deaths', 'active', 'recovered']]
-        df = df.loc[(df.T != 0).any()]
+    def prepare_country_df(self, country):
+        df = pandas.DataFrame(columns=self.STATUS)
+        for status, status_df in self.df_by_status.items():
+            country_status_df = status_df.loc[status_df.country == country]
+            sum_df = country_status_df.groupby('country').sum()
+            df[status] = sum_df.iloc[0, :]
+        df = df.fillna(method='ffill')
+        df['active'] = df.confirmed - df.deaths - df.recovered
         datetimes = [datetime.datetime.strptime(d, '%Y-%m-%d') for d in df.index]
         short_dates = numpy.array([d.strftime('%d/%m') for d in datetimes])
-        df.reindex(short_dates)
+        df.index = short_dates
+        return df
+
+    def make_cumulative_chart(self, df, country):
+        df = df[['active', 'deaths', 'recovered']]
+        df = df.loc[(df.T != 0).any()]
         index_ticks = numpy.arange(0, len(df), 5)
-        label_ticks = short_dates[index_ticks]
-        df.plot(kind='bar', color=['red', 'orange', 'dodgerblue'], stacked=True, width=0.84)
+        label_ticks = df.index[index_ticks]
+        df.plot(kind='bar', color=['orange', 'red', 'dodgerblue'], stacked=True, width=0.84)
         plt.xticks(index_ticks, label_ticks)
         plt.legend(loc='upper left')
         plt.title(country)
         plt.grid()
         plot_path = self.cumul_dir / f'{country}.png'
         if not plot_path.exists():
-            print(f'new chart for {country}')
+            print(f'new cumulative chart for {country}')
         plt.savefig(plot_path)
         plt.close()
+
+    @staticmethod
+    def fit_function(x, a, b):
+        return numpy.exp(a * x + b)
+
+    def add_exponential_fits(self, df):
+        last_10_days_df = df.iloc[-10:, :]
+        for column in self.STATUS[:2]:
+            params, _ = scipy.optimize.curve_fit(
+                self.fit_function,
+                range(len(df)-10, len(df)),
+                last_10_days_df[column],
+                method='dogbox'
+            )
+            data_fit = self.fit_function(range(len(df)), *params)
+            df[f'{column}_line'] = data_fit
+        return df
+
+    def make_log_chart(self, df, country):
+        df = df[self.STATUS[:2]]
+        df = df.loc[df.confirmed > 10]
+        pow10 = numpy.array([10**i for i in range(0, 10)])
+        mask = [df.confirmed.max() / value > 0.1 for value in pow10]
+        ticks = pow10[mask]
+        updated_df = self.add_exponential_fits(df)
+        color_map = plt.get_cmap("tab10")
+        colors = [color_map(0), color_map(1)] * 2
+        line_styles = ['-', '-', '--', '--']
+        updated_df.plot(color=colors, style=line_styles)
+        plt.yscale('log')
+        plt.yticks(ticks, [str(tick) for tick in ticks])
+        plt.ylim(10, ticks[-1])
+        plt.title(country)
+        plt.grid(which='both')
+        plot_path = self.log_dir / f'{country}.png'
+        if not plot_path.exists():
+            print(f'new log chart for {country}')
+        plt.savefig(plot_path)
+        plt.close()
+
+    @staticmethod
+    def make_active_df(actives, country, active_df):
+        last_day_data = actives.iloc[-1]
+        last_actives = actives.iloc[-4:]
+        new_old_actives = zip(last_actives.iloc[1:], last_actives[:-1])
+        growths = [(new - old) / old for new, old in new_old_actives]
+        avg_growth = numpy.mean(growths)
+        new_active = int(last_day_data * avg_growth)
+        data = [last_day_data, avg_growth * 100, new_active, last_day_data + new_active]
+        columns = ['active', 'avg_growth', 'new', 'next_day']
+        data_series = pandas.Series(data, index=columns, name=country)
+        active_df = active_df.append(data_series)
+        active_df = active_df.sort_values('active', ascending=False)
+        return active_df
 
     def save_last_day(self):
         new_last_day = {'last_day': self.today.strftime('%Y-%m-%d')}
         with open(str(self.last_day_file), 'w') as f:
             json.dump(new_last_day, f)
 
-    def make_cumulative_charts(self):
-        for country in self.countries:
-            df = pandas.DataFrame(columns=self.STATUS)
-            for status, status_df in self.df_by_status.items():
-                country_status_df = status_df.loc[status_df.country == country]
-                sum_df = country_status_df.groupby('country').sum()
-                df[status] = sum_df.iloc[0, :]
-            df = df.fillna(method='ffill')
-            # df['confirmed_new'] = df.confirmed.diff().fillna(0)
-            df['active'] = df.confirmed - df.deaths - df.recovered
-            if df.confirmed.iloc[-1] > self.MIN_FOR_CUMUL_CHART:
-                if self.today > self.last_day:
-                    self.make_chart(df, country)
-        self.save_last_day()
-
     def run(self):
-        self.make_cumulative_charts()
+        if self.today > self.last_day:
+            active_df = pandas.DataFrame()
+            for country in self.countries:
+                country_df = self.prepare_country_df(country)
+                if country_df.confirmed.iloc[-1] > self.MIN_FOR_CHARTS:
+                    active_df = self.make_active_df(country_df.active, country, active_df)
+                    self.make_cumulative_chart(country_df, country)
+                    self.make_log_chart(country_df, country)
+            self.save_last_day()
+            print(active_df.to_string())
 
 
 if __name__ == '__main__':
