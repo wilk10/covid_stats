@@ -1,5 +1,5 @@
 .DS_Store
 .idea/
 2020-03-24/
-cumul_charts/
-log_charts/
+charts/
+drop_df/

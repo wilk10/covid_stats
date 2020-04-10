@@ -19,7 +19,8 @@ class CovidStats:
         self.cwd = pathlib.Path.cwd()
         self.df_by_status = self.make_df_by_status()
         self.countries = self.df_by_status['confirmed'].country.unique()
-        self.dir_by_chart_type = self.make_dirs()
+        self.drop_df_dir = self.cwd / 'drop_df'
+        self.dir_by_chart_type = self.make_all_dirs()
         self.last_day_file = self.cwd / "last_day.json"
         self.last_day = self.get_last_day()
         self.today = datetime.date.today()
@@ -59,7 +60,9 @@ class CovidStats:
             print(f'{status} df made')
         return df_by_status
 
-    def make_dirs(self):
+    def make_all_dirs(self):
+        if not self.drop_df_dir.exists():
+            self.drop_df_dir.mkdir()
         dir_by_chart_type = dict.fromkeys(self.CHART_TYPES)
         charts_dir = self.cwd / 'charts'
         if not charts_dir.exists():
@@ -71,6 +74,13 @@ class CovidStats:
             dir_by_chart_type[chart_type] = chart_type_dir
         return dir_by_chart_type
 
+    @staticmethod
+    def shorten_index_dates(df):
+        datetimes = [datetime.datetime.strptime(d, '%Y-%m-%d') for d in df.index]
+        short_dates = numpy.array([d.strftime('%d/%m') for d in datetimes])
+        df.index = short_dates
+        return df
+
     def prepare_country_df(self, country):
         df = pandas.DataFrame(columns=self.STATUS)
         for status, status_df in self.df_by_status.items():
@@ -79,9 +89,7 @@ class CovidStats:
             df[status] = sum_df.iloc[0, :]
         df = df.fillna(method='ffill')
         df['active'] = df.confirmed - df.deaths - df.recovered
-        datetimes = [datetime.datetime.strptime(d, '%Y-%m-%d') for d in df.index]
-        short_dates = numpy.array([d.strftime('%d/%m') for d in datetimes])
-        df.index = short_dates
+        df = self.shorten_index_dates(df)
         return df
 
     def make_cumulative_chart(self, df, country):
@@ -165,7 +173,7 @@ class CovidStats:
         columns = ['active', 'avg_growth', 'new', 'next_day']
         data_series = pandas.Series(data, index=columns, name=country)
         active_df = active_df.append(data_series)
-        active_df = active_df.sort_values('active', ascending=False)
+        active_df = active_df.sort_values('avg_growth', ascending=False)
         return active_df
 
     def save_last_day_and_drop_df(self, drop_df):
@@ -173,11 +181,30 @@ class CovidStats:
         new_last_day = {'last_day': today_str}
         with open(str(self.last_day_file), 'w') as f:
             json.dump(new_last_day, f)
-        drop_df_dir = self.cwd / 'drop_df'
-        if not drop_df_dir.exists():
-            drop_df_dir.mkdir()
-        drop_df_path = drop_df_dir / f'{today_str}.csv'
+        drop_df_path = self.drop_df_dir / f'{today_str}.csv'
         drop_df.to_csv(str(drop_df_path))
+
+    def make_drop_chart(self):
+        chart_df = pandas.DataFrame()
+        for file in self.drop_df_dir.iterdir():
+            day_df = pandas.read_csv(str(file), index_col=0)
+            day_row = day_df.days_to_0.T
+            day_row.name = file.name.split('.')[0]
+            chart_df = chart_df.append(day_row)
+        chart_df = self.shorten_index_dates(chart_df)
+        chart_df.plot()
+        ticks = numpy.arange(0, 365*2+1, 365//4)
+        ticks_labels = [str(n) for n in numpy.arange(0, 25, 3)]
+        plt.yticks(ticks, ticks_labels)
+        plt.ylim(0, ticks[-1])
+        plt.grid()
+        plt.legend()
+        plt.ylabel('months from now')
+        plt.xlabel('day of prediction')
+        plt.title('months to 0 active cases')
+        plot_path = self.cwd / 'charts' / 'drop_df.png'
+        plt.savefig(plot_path)
+        plt.close()
 
     def run(self):
         if self.today > self.last_day:
@@ -193,6 +220,7 @@ class CovidStats:
             self.save_last_day_and_drop_df(drop_df)
             print(active_df.to_string())
             print(f'\ncountries with dropping active cases:\n{drop_df}')
+            self.make_drop_chart()
 
 
 if __name__ == '__main__':
