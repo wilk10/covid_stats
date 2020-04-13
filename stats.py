@@ -43,7 +43,10 @@ class CovidStats:
         history_series = history_series.reindex(sorted_dates)
         country = country_data['country'].lower()
         province = country_data['province'].lower()
-        country_series = pandas.Series([country, province], index=['country', 'province'])
+        if country == 'china' and province == 'hong kong':
+            country_series = pandas.Series(['hong kong', ''], index=['country', 'province'])
+        else:
+            country_series = pandas.Series([country, province], index=['country', 'province'])
         country_series = country_series.append(history_series)
         return country_series
 
@@ -188,16 +191,16 @@ class CovidStats:
         chart_df = pandas.DataFrame()
         for file in self.drop_df_dir.iterdir():
             day_df = pandas.read_csv(str(file), index_col=0)
-            day_row = day_df.days_to_0.T
+            day_row = day_df.days_to_0.loc[day_df.days_to_0 <= 365*2]
             day_row.name = file.name.split('.')[0]
             chart_df = chart_df.append(day_row)
         chart_df = self.shorten_index_dates(chart_df)
-        chart_df.plot()
+        chart_df.plot(marker='o', markersize=3)
         ticks = numpy.arange(0, 365*2+1, 365//4)
         ticks_labels = [str(n) for n in numpy.arange(0, 25, 3)]
         plt.yticks(ticks, ticks_labels)
         plt.ylim(0, ticks[-1])
-        plt.grid()
+        plt.grid(which='both')
         plt.legend()
         plt.ylabel('months from now')
         plt.xlabel('day of prediction')
@@ -222,6 +225,29 @@ class CovidStats:
             print(f'\ncountries with dropping active cases:\n{drop_df}')
             self.make_drop_chart()
 
+    def make_past_drop_dfs(self, start_date_str):
+        start_date = datetime.datetime.strptime(start_date_str, '%Y-%m-%d').date()
+        days_in_between = (self.today - start_date).days
+        dates = [start_date + datetime.timedelta(days=i) for i in range(days_in_between)]
+        for considered_date in dates:
+            drop_df = pandas.DataFrame(columns=self.DROP_COLUMNS)
+            for country in self.countries:
+                df = self.prepare_country_df(country)
+                datetimes = [datetime.datetime.strptime(d + '/2020', '%d/%m/%Y') for d in df.index]
+                filtered_datetimes = [d for d in datetimes if d.date() < considered_date]
+                filtered_rows = [d.strftime('%d/%m') for d in filtered_datetimes]
+                filtered_df = df.loc[filtered_rows, :]
+                if filtered_df.confirmed.iloc[-1] > self.MIN_FOR_CHARTS:
+                    _, drop_series = self.add_exponential_fits(filtered_df, ['active'])
+                    if drop_series is not None:
+                        drop_series.name = country
+                        drop_df = drop_df.append(drop_series)
+            date_str = considered_date.strftime('%Y-%m-%d')
+            drop_df_path = self.drop_df_dir / f'{date_str}.csv'
+            drop_df.to_csv(str(drop_df_path))
+        self.make_drop_chart()
+
 
 if __name__ == '__main__':
     CovidStats().run()
+    #CovidStats().make_past_drop_dfs('2020-03-01')
