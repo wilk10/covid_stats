@@ -6,6 +6,7 @@ import numpy
 import json
 import scipy.optimize
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 
 class CovidStats:
@@ -96,21 +97,23 @@ class CovidStats:
         return df
 
     def make_cumulative_chart(self, df, country):
+        was_added = False
         df = df[['active', 'deaths', 'recovered']]
         df = df.loc[(df.T != 0).any()]
         index_ticks = numpy.arange(0, len(df), 5)
         label_ticks = df.index[index_ticks]
         colours = [f'tab:{col}' for col in ['orange', 'red', 'blue']]
-        df.plot(kind='bar', color=colours, stacked=True, width=0.84)
+        df.plot(kind='bar', color=colours, stacked=True, width=0.82)
         plt.xticks(index_ticks, label_ticks)
         plt.legend(loc='upper left')
         plt.title(country)
         plt.grid()
         plot_path = self.dir_by_chart_type['cumul'] / f'{country}.png'
         if not plot_path.exists():
-            print(f'new charts for {country}')
+            was_added = True
         plt.savefig(plot_path)
         plt.close()
+        return was_added
 
     @staticmethod
     def fit_function(x, a, b):
@@ -188,13 +191,16 @@ class CovidStats:
         drop_df.to_csv(str(drop_df_path))
 
     def make_drop_chart(self):
-        chart_df = pandas.DataFrame()
+        df = pandas.DataFrame()
         for file in self.drop_df_dir.iterdir():
             day_df = pandas.read_csv(str(file), index_col=0)
             day_row = day_df.days_to_0.loc[day_df.days_to_0 <= 365*2]
             day_row.name = file.name.split('.')[0]
-            chart_df = chart_df.append(day_row)
-        chart_df = self.shorten_index_dates(chart_df)
+            df = df.append(day_row)
+        last_day = df.index[-1]
+        sorted_df = df.T.sort_values(last_day)
+        filtered_df = sorted_df.iloc[:10, :]
+        chart_df = self.shorten_index_dates(filtered_df.T)
         chart_df.plot(marker='o', markersize=3)
         ticks = numpy.arange(0, 365*2+1, 365//4)
         ticks_labels = [str(n) for n in numpy.arange(0, 25, 3)]
@@ -208,22 +214,6 @@ class CovidStats:
         plot_path = self.cwd / 'charts' / 'drop_df.png'
         plt.savefig(plot_path)
         plt.close()
-
-    def run(self):
-        if self.today > self.last_day:
-            active_df = pandas.DataFrame()
-            drop_df = pandas.DataFrame(columns=self.DROP_COLUMNS)
-            for country in self.countries:
-                country_df = self.prepare_country_df(country)
-                if country_df.confirmed.iloc[-1] > self.MIN_FOR_CHARTS:
-                    active_df = self.make_active_df(country_df.active, country, active_df)
-                    self.make_cumulative_chart(country_df, country)
-                    for status in ['confirmed', 'active']:
-                        drop_df = self.make_log_chart(country_df, country, status, drop_df)
-            self.save_last_day_and_drop_df(drop_df)
-            print(active_df.to_string())
-            print(f'\ncountries with dropping active cases:\n{drop_df}')
-            self.make_drop_chart()
 
     def make_past_drop_dfs(self, start_date_str):
         start_date = datetime.datetime.strptime(start_date_str, '%Y-%m-%d').date()
@@ -246,6 +236,28 @@ class CovidStats:
             drop_df_path = self.drop_df_dir / f'{date_str}.csv'
             drop_df.to_csv(str(drop_df_path))
         self.make_drop_chart()
+
+    def run(self):
+        if self.today > self.last_day:
+            active_df = pandas.DataFrame()
+            drop_df = pandas.DataFrame(columns=self.DROP_COLUMNS)
+            added_countries = []
+            for country in tqdm(self.countries):
+                country_df = self.prepare_country_df(country)
+                if country_df.confirmed.iloc[-1] > self.MIN_FOR_CHARTS:
+                    active_df = self.make_active_df(country_df.active, country, active_df)
+                    was_added = self.make_cumulative_chart(country_df, country)
+                    if was_added:
+                        added_countries.append(country)
+                    for status in ['confirmed', 'active']:
+                        drop_df = self.make_log_chart(country_df, country, status, drop_df)
+            self.save_last_day_and_drop_df(drop_df)
+            for country in added_countries:
+                print(f'new charts for {country}')
+            print(active_df.to_string())
+            drop_df = drop_df.sort_values('days_to_0')
+            print(f'\ncountries with dropping active cases:\n{drop_df}')
+            self.make_drop_chart()
 
 
 if __name__ == '__main__':
